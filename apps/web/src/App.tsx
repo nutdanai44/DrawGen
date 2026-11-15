@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { downloadDrawio, saveDrawioFile, normalizeFileName, type LocalFileHandle } from './fileStorage';
-import { DRAWIO_ORIGIN, DRAWIO_URL, EMPTY_XML, isDrawioXml, countDiagramCells, parseEditorMessage } from './editorBridge';
+import { DRAWIO_ORIGIN, DRAWIO_URL, EMPTY_XML, xmlForEmbedLoad, isDrawioXml, countDiagramCells, parseEditorMessage } from './editorBridge';
 type Doc = { xml: string; revision: number; updatedAt: string };
 type Mode = 'discuss' | 'auto' | 'review';
 type Provider = 'openai' | 'anthropic';
@@ -32,6 +32,7 @@ export default function App() {
   const pending = useRef(false);
   const fileAction = useRef<'save'|'saveAs'|null>(null);
   const exportTimeout = useRef<ReturnType<typeof setTimeout>|null>(null);
+  const initTimeout = useRef<ReturnType<typeof setTimeout>|null>(null);
   useEffect(()=>{latest.current=doc;try{localStorage.setItem(KEY,JSON.stringify(doc));}catch{setNotice('Browser storage unavailable. Export your work.');}},[doc]);
   useEffect(()=>{linesRef.current=lines;},[lines]);
   const send = useCallback((value:object)=>{frame.current?.contentWindow?.postMessage(JSON.stringify(value),DRAWIO_ORIGIN);},[]);
@@ -41,10 +42,15 @@ export default function App() {
   },[]);
   useEffect(()=>{
     if(!open)return;
+    initTimeout.current=setTimeout(()=>setNotice('draw.io did not initialize. Check network access to embed.diagrams.net and browser console.'),15000);
     const onMessage=(event:MessageEvent)=>{
       if(event.source!==frame.current?.contentWindow)return;
       const message=parseEditorMessage(event);if(!message)return;
-      if(message.event==='init'){setReady(true);send({action:'load',xml:latest.current.xml,autosave:1});}
+      if(message.event==='init'){
+        if(initTimeout.current)clearTimeout(initTimeout.current);
+        try {send({action:'load',xml:xmlForEmbedLoad(latest.current.xml),autosave:1});setReady(true);setNotice('Editor loaded: '+countDiagramCells(latest.current.xml)+' diagram elements.');}
+        catch(error){setNotice('Could not load diagram: '+(error as Error).message);}
+      }
       if((message.event==='autosave'||message.event==='save')&&message.xml){if(!pending.current){if(countDiagramCells(message.xml)===0&&countDiagramCells(latest.current.xml)>0)setNotice('Empty editor autosave ignored to prevent losing the diagram.');else save(message.xml);}}
       if(message.event==='export' && typeof message.xml==='string') {
         if(exportTimeout.current)clearTimeout(exportTimeout.current);
@@ -54,10 +60,11 @@ export default function App() {
         save(message.xml);latest.current={...latest.current,xml:message.xml,revision:latest.current.revision+(message.xml===latest.current.xml?0:1)};
         if(action)void persistFile(action,message.xml);
       }
+      if(message.event==='load')setNotice('draw.io confirmed diagram load.');
       if(message.event==='exit'){setOpen(false);setReady(false);}
       if(message.event==='error')setNotice(message.message||'Editor error');
     };
-    window.addEventListener('message',onMessage);return()=>window.removeEventListener('message',onMessage);
+    window.addEventListener('message',onMessage);return()=>{window.removeEventListener('message',onMessage);if(initTimeout.current)clearTimeout(initTimeout.current);};
   },[open,send,save,editorGeneration]);
   function applyXml(xml:string){
     if(!isDrawioXml(xml)){setNotice('AI XML validation failed. No changes applied.');return;}
