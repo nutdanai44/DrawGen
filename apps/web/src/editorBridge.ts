@@ -4,3 +4,11 @@ export const EMPTY_XML = `<mxfile host="app.diagrams.net"><diagram id="page-1" n
 export interface EditorMessage { event: string; xml?: string; message?: string }
 export function parseEditorMessage(event: MessageEvent): EditorMessage | null { if(event.origin!==DRAWIO_ORIGIN) return null; try {const data=typeof event.data==="string"?JSON.parse(event.data):event.data;return data&&typeof data.event==="string"?data:null;}catch{return null;} }
 export function isDrawioXml(xml:string):boolean {try{const doc=new DOMParser().parseFromString(xml,"application/xml");return !doc.querySelector("parsererror")&&["mxfile","mxGraphModel"].includes(doc.documentElement.tagName);}catch{return false;}}
+
+export function countDiagramCells(xml:string):number {
+  try {
+    const parsed=new DOMParser().parseFromString(xml,'application/xml');
+    if(parsed.querySelector('parsererror'))return 0;
+    return [...parsed.querySelectorAll('mxCell')].filter(cell=>cell.getAttribute('vertex')==='1'||cell.getAttribute('edge')==='1').length;
+  }catch{return 0;}
+}

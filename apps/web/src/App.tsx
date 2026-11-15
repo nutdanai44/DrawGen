@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { downloadDrawio, saveDrawioFile, normalizeFileName, type LocalFileHandle } from './fileStorage';
-import { DRAWIO_ORIGIN, DRAWIO_URL, EMPTY_XML, isDrawioXml, parseEditorMessage } from './editorBridge';
+import { DRAWIO_ORIGIN, DRAWIO_URL, EMPTY_XML, isDrawioXml, countDiagramCells, parseEditorMessage } from './editorBridge';
 type Doc = { xml: string; revision: number; updatedAt: string };
 type Mode = 'discuss' | 'auto' | 'review';
 type Provider = 'openai' | 'anthropic';
@@ -31,6 +31,7 @@ export default function App() {
   const linesRef = useRef(lines);
   const pending = useRef(false);
   const fileAction = useRef<'save'|'saveAs'|null>(null);
+  const exportTimeout = useRef<ReturnType<typeof setTimeout>|null>(null);
   useEffect(()=>{latest.current=doc;try{localStorage.setItem(KEY,JSON.stringify(doc));}catch{setNotice('Browser storage unavailable. Export your work.');}},[doc]);
   useEffect(()=>{linesRef.current=lines;},[lines]);
   const send = useCallback((value:object)=>{frame.current?.contentWindow?.postMessage(JSON.stringify(value),DRAWIO_ORIGIN);},[]);
@@ -44,8 +45,15 @@ export default function App() {
       if(event.source!==frame.current?.contentWindow)return;
       const message=parseEditorMessage(event);if(!message)return;
       if(message.event==='init'){setReady(true);send({action:'load',xml:latest.current.xml,autosave:1});}
-      if((message.event==='autosave'||message.event==='save')&&message.xml){if(!pending.current)save(message.xml);}
-      if(message.event==='export' && typeof message.xml==='string') { save(message.xml); const action=fileAction.current; fileAction.current=null; if(action) void persistFile(action,message.xml); }
+      if((message.event==='autosave'||message.event==='save')&&message.xml){if(!pending.current){if(countDiagramCells(message.xml)===0&&countDiagramCells(latest.current.xml)>0)setNotice('Empty editor autosave ignored to prevent losing the diagram.');else save(message.xml);}}
+      if(message.event==='export' && typeof message.xml==='string') {
+        if(exportTimeout.current)clearTimeout(exportTimeout.current);
+        const action=fileAction.current;fileAction.current=null;
+        if(!isDrawioXml(message.xml)){setNotice('Editor export was invalid. File not saved.');return;}
+        if(countDiagramCells(message.xml)===0 && countDiagramCells(latest.current.xml)>0){setNotice('Editor returned an empty diagram. File save blocked to prevent data loss.');return;}
+        save(message.xml);latest.current={...latest.current,xml:message.xml,revision:latest.current.revision+(message.xml===latest.current.xml?0:1)};
+        if(action)void persistFile(action,message.xml);
+      }
       if(message.event==='exit'){setOpen(false);setReady(false);}
       if(message.event==='error')setNotice(message.message||'Editor error');
     };
@@ -81,6 +89,7 @@ export default function App() {
   }
   async function persistFile(action:'save'|'saveAs', xml:string=latest.current.xml) {
     if(!isDrawioXml(xml)){setNotice('Cannot save invalid draw.io XML');return;}
+    if(countDiagramCells(xml)===0 && !confirm('This diagram has no shapes. Save an empty file?'))return;
     try {
       const result=await saveDrawioFile(xml,fileName,action==='save'?fileHandle:null);
       if(result.handle)setFileHandle(result.handle);
@@ -94,7 +103,9 @@ export default function App() {
   function requestSave(action:'save'|'saveAs') {
     if(open && ready) {
       fileAction.current=action;
-      send({action:'export',format:'xml'});
+      if(exportTimeout.current)clearTimeout(exportTimeout.current);
+      exportTimeout.current=setTimeout(()=>{if(fileAction.current){fileAction.current=null;setNotice('Editor did not return XML. Save cancelled; try again.');}},12000);
+      send({action:'export',format:'xml',xml:1});
       setNotice('Syncing editor before saving…');
     } else if(open) setNotice('Wait for editor to connect before saving.');
     else void persistFile(action);
