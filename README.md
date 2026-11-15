@@ -35,3 +35,7 @@ Open the draw.io editor to see and manually edit the result. Export `.drawio` to
 - When the editor is open, Save/Save As requests an XML export from the editor before writing. Test the embed event flow in your browser.
 
 **Browser support:** Direct file write generally requires Chromium on localhost/secure context. Safari/Firefox use downloads instead. Saving to disk is never automatic; browser permission is required.
+
+## Phase 3 preview
+
+Review proposals now show a cell-level summary of added, modified and removed IDs. Undo AI / Redo AI keep up to 20 prior diagram snapshots in page memory. This is **not** yet deterministic patch application: the model still returns a complete XML document. Editor-native undo history is separate, and page reload clears AI undo history. Use Review for critical changes.

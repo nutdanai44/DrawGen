@@ -1,3 +1,4 @@
+import { compareDiagrams } from './diagramDiff';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { downloadDrawio, saveDrawioFile, normalizeFileName, type LocalFileHandle } from './fileStorage';
 import { DRAWIO_ORIGIN, DRAWIO_URL, EMPTY_XML, xmlForEmbedLoad, isDrawioXml, countDiagramCells, parseEditorMessage } from './editorBridge';
@@ -11,6 +12,8 @@ const initial: Doc = { xml: EMPTY_XML, revision: 0, updatedAt: new Date().toISOS
 function restore(): Doc { try { const value = JSON.parse(localStorage.getItem(KEY) || 'null') as Doc | null; if (value && isDrawioXml(value.xml) && Number.isInteger(value.revision)) return value; } catch {} return initial; }
 export default function App() {
   const [doc,setDoc] = useState<Doc>(restore);
+  const [undoStack,setUndoStack] = useState<string[]>([]);
+  const [redoStack,setRedoStack] = useState<string[]>([]);
   const [fileName,setFileName] = useState('Untitled.drawio');
   const [fileHandle,setFileHandle] = useState<LocalFileHandle|null>(null);
   const [savedRevision,setSavedRevision] = useState<number|null>(null);
@@ -66,6 +69,23 @@ export default function App() {
     };
     window.addEventListener('message',onMessage);return()=>{window.removeEventListener('message',onMessage);if(initTimeout.current)clearTimeout(initTimeout.current);};
   },[open,send,save,editorGeneration]);
+  function setDiagramSnapshot(xml:string){
+    if(!isDrawioXml(xml))return;
+    const previous=latest.current.xml;
+    if(previous===xml)return;
+    setUndoStack(items=>[...items.slice(-19),previous]);setRedoStack([]);
+    applyXml(xml);
+  }
+  function undoDiagram(){
+    if(!undoStack.length)return;
+    const previous=undoStack[undoStack.length-1];
+    setUndoStack(items=>items.slice(0,-1));setRedoStack(items=>[...items,latest.current.xml]);applyXml(previous);setProposal(null);
+  }
+  function redoDiagram(){
+    if(!redoStack.length)return;
+    const next=redoStack[redoStack.length-1];
+    setRedoStack(items=>items.slice(0,-1));setUndoStack(items=>[...items,latest.current.xml]);applyXml(next);setProposal(null);
+  }
   function applyXml(xml:string){
     if(!isDrawioXml(xml)){setNotice('AI XML validation failed. No changes applied.');return;}
     pending.current=true;
@@ -74,7 +94,7 @@ export default function App() {
     setTimeout(()=>{pending.current=false;},1500);
     setNotice('AI changes applied. Revision saved locally.');
   }
-  function applyProposal(){if(!proposal)return;if(proposal.baseRevision!==latest.current.revision){setNotice('Diagram changed since proposal. Please regenerate.');setProposal(null);return;}applyXml(proposal.xml);setProposal(null);}
+  function applyProposal(){if(!proposal)return;if(proposal.baseRevision!==latest.current.revision){setNotice('Diagram changed since proposal. Please regenerate.');setProposal(null);return;}setDiagramSnapshot(proposal.xml);setProposal(null);}
   async function submit(){
     const input=prompt.trim();if(!input||busy)return;
     const revision=latest.current.revision;
@@ -89,7 +109,7 @@ export default function App() {
         if(!isDrawioXml(data.xml))throw new Error('AI returned invalid XML');
         if(latest.current.revision!==revision){setProposal({xml:data.xml,changes:data.changes||[],baseRevision:revision});setNotice('Diagram changed during AI response. Review required.');}
         else if(mode==='review'){setProposal({xml:data.xml,changes:data.changes||[],baseRevision:revision});setNotice('Review changes before applying.');}
-        else if(mode==='auto')applyXml(data.xml);
+        else if(mode==='auto')setDiagramSnapshot(data.xml);
       }else setNotice('Discussion updated; diagram unchanged.');
     }catch(error){const msg=error instanceof Error?error.message:'Unknown error';setLines(prev=>[...prev,{role:'assistant',content:'Error: '+msg}]);setNotice(msg);}
     finally{setBusy(false);}
@@ -122,6 +142,7 @@ export default function App() {
     const count=countDiagramCells(xml);
     const next={xml,revision:latest.current.revision+1,updatedAt:new Date().toISOString()};
     latest.current=next;setDoc(next);setFileName(normalizeFileName(name));setFileHandle(handle);setSavedRevision(handle?next.revision:null);setProposal(null);
+    setUndoStack([]);setRedoStack([]);
     setReady(false);setEditorGeneration(v=>v+1);setOpen(true);
     setNotice('Opening '+name+' ('+count+' shapes/connections) in draw.io…');
   }
@@ -149,11 +170,11 @@ export default function App() {
     if(open){setNotice('Close editor first.');return;}
     if(confirm('Replace current diagram? Save a backup if needed.')){
       save(EMPTY_XML);latest.current={...latest.current,xml:EMPTY_XML,revision:latest.current.revision+1};
-      setFileName('Untitled.drawio');setFileHandle(null);setSavedRevision(null);setProposal(null);setLines([]);
+      setUndoStack([]);setRedoStack([]);setFileName('Untitled.drawio');setFileHandle(null);setSavedRevision(null);setProposal(null);setLines([]);
     }
   }
   return <div className="shell">
-    <header className="topbar"><div className="brand">◇ AI Flow Studio <small>Phase 2</small></div><nav><button onClick={newFile}>New</button><button onClick={()=>void openFile()}>Open File</button><input id="diagram-file-input" hidden type="file" accept=".drawio,.xml" onChange={e=>{void importFile(e.target.files?.[0]);e.target.value='';}}/><button onClick={()=>requestSave('save')}>Save</button><button onClick={()=>requestSave('saveAs')}>Save As</button><button onClick={()=>downloadDrawio(doc.xml,fileName)}>Download</button><button className="primary" onClick={()=>setOpen(true)}>Open Editor</button></nav></header>
+    <header className="topbar"><div className="brand">◇ AI Flow Studio <small>Phase 2</small></div><nav><button onClick={newFile}>New</button><button disabled={!undoStack.length} onClick={undoDiagram} title="Undo last AI change">Undo AI</button><button disabled={!redoStack.length} onClick={redoDiagram} title="Redo last AI change">Redo AI</button><button onClick={()=>void openFile()}>Open File</button><input id="diagram-file-input" hidden type="file" accept=".drawio,.xml" onChange={e=>{void importFile(e.target.files?.[0]);e.target.value='';}}/><button onClick={()=>requestSave('save')}>Save</button><button onClick={()=>requestSave('saveAs')}>Save As</button><button onClick={()=>downloadDrawio(doc.xml,fileName)}>Download</button><button className="primary" onClick={()=>setOpen(true)}>Open Editor</button></nav></header>
     <main><aside className="chat"><h3>AI Assistant <small>OpenAI + Claude</small></h3>
       <label>AI Provider</label><select value={provider} onChange={e=>setProvider(e.target.value as Provider)}><option value="openai">OpenAI</option><option value="anthropic">Claude (Anthropic)</option></select>
       <label>{provider==='openai'?'OpenAI API Key':'Anthropic API Key'} (session only)</label>
@@ -161,7 +182,7 @@ export default function App() {
       <p className="hint">Key stays in page memory, not browser storage. Backend also accepts keys from local .env. API usage is billed separately.</p>
       <label>Hybrid Mode</label><div className="modes">{(['discuss','auto','review'] as const).map(m=><button key={m} className={mode===m?'selected':''} onClick={()=>setMode(m)}>{m}</button>)}</div>
       <div className="chat-history">{lines.length===0?<div className="chat-placeholder"><h2>Design flows together</h2><p>Discuss first, then choose Auto or Review to create/edit the diagram.</p><p>Try “Create a login flow with OTP and token refresh”</p></div>:lines.map((m,i)=><div className={'bubble '+m.role} key={i}><strong>{m.role==='user'?'You':provider==='openai'?'AI':'AI'}</strong><p>{m.content}</p></div>)}</div>
-      {proposal&&<div className="proposal"><strong>Proposed changes (revision {proposal.baseRevision})</strong>{proposal.changes.map((c,i)=><p key={i}>• {c}</p>)}<div className="proposal-buttons"><button className="primary" onClick={applyProposal}>Apply</button><button onClick={()=>{setProposal(null);setNotice('Proposal rejected.');}}>Reject</button></div></div>}
+      {proposal&&<div className="proposal"><strong>Proposed changes (revision {proposal.baseRevision})</strong><div className="diff-summary">{(()=>{const d=compareDiagrams(doc.xml,proposal.xml);return <><p>+ {d.added.length} added · ~ {d.modified.length} modified · − {d.removed.length} removed</p>{d.warning&&<p>{d.warning}</p>}{d.added.length>0&&<p>Added IDs: {d.added.slice(0,12).join(', ')}</p>}{d.modified.length>0&&<p>Modified IDs: {d.modified.slice(0,12).join(', ')}</p>}{d.removed.length>0&&<p>Removed IDs: {d.removed.slice(0,12).join(', ')}</p>}</>;})()}</div>{proposal.changes.map((c,i)=><p key={i}>• {c}</p>)}<div className="proposal-buttons"><button className="primary" onClick={applyProposal}>Apply</button><button onClick={()=>{setProposal(null);setNotice('Proposal rejected.');}}>Reject</button></div></div>}
       <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void submit();}}} placeholder="Describe a flow or request a change..."/><button className="primary" disabled={busy||!prompt.trim()} onClick={()=>void submit()}>{busy?'Generating…':mode==='discuss'?'Discuss':mode==='review'?'Propose Changes':'Generate / Apply'}</button>
     </aside><section className="workspace"><div className="heading"><strong><input aria-label="Diagram filename" className="filename-input" value={fileName} onChange={e=>setFileName(e.target.value)} onBlur={()=>setFileName(v=>normalizeFileName(v))}/>{savedRevision!==doc.revision?' • Unsaved to file':''}</strong><span>Revision {doc.revision} · {new Date(doc.updatedAt).toLocaleString()}</span></div>
       {open?<div className="editor"><div className="editor-bar"><span>{ready?'Editor connected':'Connecting…'}</span><button onClick={()=>send({action:'save'})}>Save</button><button onClick={()=>{if(confirm('Close editor? Unsaved edits may be lost.')){setOpen(false);setReady(false);}}}>Close</button></div><iframe key={editorGeneration} ref={frame} title="draw.io Editor" src={DRAWIO_URL} allow="clipboard-read; clipboard-write"/></div>
