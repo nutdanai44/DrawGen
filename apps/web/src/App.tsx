@@ -1,86 +1,95 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DRAWIO_ORIGIN, DRAWIO_URL, EMPTY_XML, isDrawioXml, parseEditorMessage } from './editorBridge';
-
 type Doc = { xml: string; revision: number; updatedAt: string };
 type Mode = 'discuss' | 'auto' | 'review';
 type Provider = 'openai' | 'anthropic';
+type ChatLine = { role: 'user' | 'assistant'; content: string };
+type Proposal = { xml: string; changes: string[]; baseRevision: number };
 const KEY = 'ai-flow-studio.phase1.document';
 const initial: Doc = { xml: EMPTY_XML, revision: 0, updatedAt: new Date().toISOString() };
-function restore(): Doc {
-  try {
-    const value = JSON.parse(localStorage.getItem(KEY) || 'null') as Doc | null;
-    if (value && isDrawioXml(value.xml) && Number.isInteger(value.revision)) return value;
-  } catch { /* fallback */ }
-  return initial;
-}
+function restore(): Doc { try { const value = JSON.parse(localStorage.getItem(KEY) || 'null') as Doc | null; if (value && isDrawioXml(value.xml) && Number.isInteger(value.revision)) return value; } catch {} return initial; }
 export default function App() {
-  const [doc, setDoc] = useState<Doc>(restore);
-  const [open, setOpen] = useState(false);
-  const [ready, setReady] = useState(false);
-  const [mode, setMode] = useState<Mode>('discuss');
-  const [provider, setProvider] = useState<Provider>('openai');
-  const [prompt, setPrompt] = useState('');
-  const [notice, setNotice] = useState('Phase 1: draw.io is ready; AI chat comes in Phase 2.');
+  const [doc,setDoc] = useState<Doc>(restore);
+  const [open,setOpen] = useState(false);
+  const [ready,setReady] = useState(false);
+  const [editorGeneration,setEditorGeneration] = useState(0);
+  const [mode,setMode] = useState<Mode>('discuss');
+  const [provider,setProvider] = useState<Provider>('openai');
+  const [keys,setKeys] = useState<Record<Provider,string>>({openai:'',anthropic:''});
+  const [showKey,setShowKey] = useState(false);
+  const [prompt,setPrompt] = useState('');
+  const [lines,setLines] = useState<ChatLine[]>([]);
+  const [proposal,setProposal] = useState<Proposal|null>(null);
+  const [busy,setBusy] = useState(false);
+  const [notice,setNotice] = useState('Phase 2 ready: choose provider, enter API key, and start chatting.');
   const frame = useRef<HTMLIFrameElement>(null);
   const latest = useRef(doc);
-  useEffect(() => {
-    latest.current = doc;
-    try { localStorage.setItem(KEY, JSON.stringify(doc)); }
-    catch { setNotice('Browser storage unavailable. Export your work.'); }
-  }, [doc]);
-  const send = useCallback((value: object) => {
-    frame.current?.contentWindow?.postMessage(JSON.stringify(value), DRAWIO_ORIGIN);
-  }, []);
-  const save = useCallback((xml: string) => {
-    if (!isDrawioXml(xml)) { setNotice('Invalid XML: changes were not saved.'); return; }
-    setDoc(prev => prev.xml === xml ? prev : ({ xml, revision: prev.revision + 1, updatedAt: new Date().toISOString() }));
-    setNotice('Saved locally.');
-  }, []);
-  useEffect(() => {
-    if (!open) return;
-    const onMessage = (event: MessageEvent) => {
-      if (event.source !== frame.current?.contentWindow) return;
-      const message = parseEditorMessage(event);
-      if (!message) return;
-      if (message.event === 'init') { setReady(true); send({ action: 'load', xml: latest.current.xml, autosave: 1 }); }
-      if ((message.event === 'autosave' || message.event === 'save') && message.xml) save(message.xml);
-      if (message.event === 'exit') { setOpen(false); setReady(false); }
-      if (message.event === 'error') setNotice(message.message || 'Editor error');
+  const linesRef = useRef(lines);
+  const pending = useRef(false);
+  useEffect(()=>{latest.current=doc;try{localStorage.setItem(KEY,JSON.stringify(doc));}catch{setNotice('Browser storage unavailable. Export your work.');}},[doc]);
+  useEffect(()=>{linesRef.current=lines;},[lines]);
+  const send = useCallback((value:object)=>{frame.current?.contentWindow?.postMessage(JSON.stringify(value),DRAWIO_ORIGIN);},[]);
+  const save = useCallback((xml:string)=>{
+    if(!isDrawioXml(xml)){setNotice('Invalid XML: changes were not saved.');return;}
+    setDoc(prev=>prev.xml===xml?prev:{xml,revision:prev.revision+1,updatedAt:new Date().toISOString()});
+  },[]);
+  useEffect(()=>{
+    if(!open)return;
+    const onMessage=(event:MessageEvent)=>{
+      if(event.source!==frame.current?.contentWindow)return;
+      const message=parseEditorMessage(event);if(!message)return;
+      if(message.event==='init'){setReady(true);send({action:'load',xml:latest.current.xml,autosave:1});}
+      if((message.event==='autosave'||message.event==='save')&&message.xml){if(!pending.current)save(message.xml);}
+      if(message.event==='exit'){setOpen(false);setReady(false);}
+      if(message.event==='error')setNotice(message.message||'Editor error');
     };
-    window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
-  }, [open, send, save]);
-  function exportFile() {
-    const url = URL.createObjectURL(new Blob([doc.xml], { type: 'application/xml' }));
-    const a = document.createElement('a'); a.href = url; a.download = 'flow-studio.drawio'; a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    window.addEventListener('message',onMessage);return()=>window.removeEventListener('message',onMessage);
+  },[open,send,save,editorGeneration]);
+  function applyXml(xml:string){
+    if(!isDrawioXml(xml)){setNotice('AI XML validation failed. No changes applied.');return;}
+    pending.current=true;
+    save(xml);latest.current={xml,revision:latest.current.revision+1,updatedAt:new Date().toISOString()};
+    if(open){setReady(false);setEditorGeneration(v=>v+1);}
+    setTimeout(()=>{pending.current=false;},1500);
+    setNotice('AI changes applied. Revision saved locally.');
   }
-  async function importFile(file?: File) {
-    if (!file) return;
-    if (open) { setNotice('Close editor before importing.'); return; }
-    const xml = await file.text();
-    if (!isDrawioXml(xml)) { setNotice('Invalid draw.io file'); return; }
-    save(xml); setNotice('Imported ' + file.name);
+  function applyProposal(){if(!proposal)return;if(proposal.baseRevision!==latest.current.revision){setNotice('Diagram changed since proposal. Please regenerate.');setProposal(null);return;}applyXml(proposal.xml);setProposal(null);}
+  async function submit(){
+    const input=prompt.trim();if(!input||busy)return;
+    const revision=latest.current.revision;
+    const history=linesRef.current.slice(-12);
+    setLines(prev=>[...prev,{role:'user',content:input}]);setPrompt('');setBusy(true);setNotice('Contacting '+provider+'...');
+    try{
+      const response=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider,mode,prompt:input,xml:latest.current.xml,history,apiKey:keys[provider]})});
+      const data=await response.json() as {error?:string;message?:string;xml?:string|null;changes?:string[]};
+      if(!response.ok)throw new Error(data.error||'AI request failed');
+      setLines(prev=>[...prev,{role:'assistant',content:data.message||'Done.'}]);
+      if(data.xml){
+        if(!isDrawioXml(data.xml))throw new Error('AI returned invalid XML');
+        if(latest.current.revision!==revision){setProposal({xml:data.xml,changes:data.changes||[],baseRevision:revision});setNotice('Diagram changed during AI response. Review required.');}
+        else if(mode==='review'){setProposal({xml:data.xml,changes:data.changes||[],baseRevision:revision});setNotice('Review changes before applying.');}
+        else if(mode==='auto')applyXml(data.xml);
+      }else setNotice('Discussion updated; diagram unchanged.');
+    }catch(error){const msg=error instanceof Error?error.message:'Unknown error';setLines(prev=>[...prev,{role:'assistant',content:'Error: '+msg}]);setNotice(msg);}
+    finally{setBusy(false);}
   }
-  function newFile() {
-    if (open) { setNotice('Close editor first.'); return; }
-    if (confirm('Replace current diagram? Export a backup if needed.')) save(EMPTY_XML);
-  }
+  function exportFile(){const url=URL.createObjectURL(new Blob([doc.xml],{type:'application/xml'}));const a=document.createElement('a');a.href=url;a.download='flow-studio.drawio';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+  async function importFile(file?:File){if(!file)return;if(open){setNotice('Close editor before importing.');return;}const xml=await file.text();if(!isDrawioXml(xml)){setNotice('Invalid draw.io file');return;}save(xml);setProposal(null);setNotice('Imported '+file.name);}
+  function newFile(){if(open){setNotice('Close editor first.');return;}if(confirm('Replace current diagram? Export a backup if needed.')){save(EMPTY_XML);setProposal(null);setLines([]);}}
   return <div className="shell">
-    <header className="topbar"><div className="brand">◇ AI Flow Studio <small>Phase 1</small></div><nav>
-      <button onClick={newFile}>New</button>
-      <label className="file-button">Import<input hidden type="file" accept=".drawio,.xml" onChange={e => { void importFile(e.target.files?.[0]); e.target.value = ''; }} /></label>
-      <button onClick={exportFile}>Export .drawio</button>
-      <button className="primary" onClick={() => setOpen(true)}>Open Editor</button>
-    </nav></header>
-    <main><aside className="chat"><h3>AI Assistant <small>Phase 2</small></h3><label>Provider</label><select value={provider} onChange={e => setProvider(e.target.value as Provider)}><option value="openai">OpenAI</option><option value="anthropic">Claude</option></select>
-      <label>Hybrid Mode</label><div className="modes">{(['discuss','auto','review'] as const).map(m => <button key={m} className={mode === m ? 'selected' : ''} onClick={() => setMode(m)}>{m}</button>)}</div>
-      <div className="chat-placeholder"><h2>Design flows together</h2><p>Discuss the design and approve AI changes in future phases.</p><p>“Create a login flow with OTP and token refresh”</p></div>
-      <textarea value={prompt} onChange={e => setPrompt(e.target.value)} placeholder="AI chat available in Phase 2" /><button disabled>Send (Phase 2)</button>
+    <header className="topbar"><div className="brand">◇ AI Flow Studio <small>Phase 2</small></div><nav><button onClick={newFile}>New</button><label className="file-button">Import<input hidden type="file" accept=".drawio,.xml" onChange={e=>{void importFile(e.target.files?.[0]);e.target.value='';}}/></label><button onClick={exportFile}>Export .drawio</button><button className="primary" onClick={()=>setOpen(true)}>Open Editor</button></nav></header>
+    <main><aside className="chat"><h3>AI Assistant <small>OpenAI + Claude</small></h3>
+      <label>AI Provider</label><select value={provider} onChange={e=>setProvider(e.target.value as Provider)}><option value="openai">OpenAI</option><option value="anthropic">Claude (Anthropic)</option></select>
+      <label>{provider==='openai'?'OpenAI API Key':'Anthropic API Key'} (session only)</label>
+      <div className="key-row"><input type={showKey?'text':'password'} value={keys[provider]} placeholder={provider==='openai'?'sk-...':'sk-ant-...'} autoComplete="off" onChange={e=>setKeys(prev=>({...prev,[provider]:e.target.value}))}/><button onClick={()=>setShowKey(v=>!v)}>{showKey?'Hide':'Show'}</button></div>
+      <p className="hint">Key stays in page memory, not browser storage. Backend also accepts keys from local .env. API usage is billed separately.</p>
+      <label>Hybrid Mode</label><div className="modes">{(['discuss','auto','review'] as const).map(m=><button key={m} className={mode===m?'selected':''} onClick={()=>setMode(m)}>{m}</button>)}</div>
+      <div className="chat-history">{lines.length===0?<div className="chat-placeholder"><h2>Design flows together</h2><p>Discuss first, then choose Auto or Review to create/edit the diagram.</p><p>Try “Create a login flow with OTP and token refresh”</p></div>:lines.map((m,i)=><div className={'bubble '+m.role} key={i}><strong>{m.role==='user'?'You':provider==='openai'?'AI':'AI'}</strong><p>{m.content}</p></div>)}</div>
+      {proposal&&<div className="proposal"><strong>Proposed changes (revision {proposal.baseRevision})</strong>{proposal.changes.map((c,i)=><p key={i}>• {c}</p>)}<div className="proposal-buttons"><button className="primary" onClick={applyProposal}>Apply</button><button onClick={()=>{setProposal(null);setNotice('Proposal rejected.');}}>Reject</button></div></div>}
+      <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void submit();}}} placeholder="Describe a flow or request a change..."/><button className="primary" disabled={busy||!prompt.trim()} onClick={()=>void submit()}>{busy?'Generating…':mode==='discuss'?'Discuss':mode==='review'?'Propose Changes':'Generate / Apply'}</button>
     </aside><section className="workspace"><div className="heading"><strong>Diagram Workspace</strong><span>Revision {doc.revision} · {new Date(doc.updatedAt).toLocaleString()}</span></div>
-      {open ? <div className="editor"><div className="editor-bar"><span>{ready ? 'Editor connected' : 'Connecting…'}</span><button onClick={() => send({ action: 'save' })}>Save</button><button onClick={() => { if (confirm('Close editor? Unsaved edits may be lost.')) { setOpen(false); setReady(false); } }}>Close</button></div>
-        <iframe ref={frame} title="draw.io Editor" src={DRAWIO_URL} allow="clipboard-read; clipboard-write" /></div>
-      : <div className="empty"><h2>Ready to draw</h2><p>Open draw.io to create and edit your diagram. Auto-save keeps your work in the browser.</p><button className="primary" onClick={() => setOpen(true)}>Open draw.io Editor</button></div>}
+      {open?<div className="editor"><div className="editor-bar"><span>{ready?'Editor connected':'Connecting…'}</span><button onClick={()=>send({action:'save'})}>Save</button><button onClick={()=>{if(confirm('Close editor? Unsaved edits may be lost.')){setOpen(false);setReady(false);}}}>Close</button></div><iframe key={editorGeneration} ref={frame} title="draw.io Editor" src={DRAWIO_URL} allow="clipboard-read; clipboard-write"/></div>
+      :<div className="empty"><h2>Ready to draw</h2><p>Open draw.io to create or edit, or ask AI to generate a diagram.</p><button className="primary" onClick={()=>setOpen(true)}>Open draw.io Editor</button></div>}
       <footer>{notice}</footer></section></main>
   </div>;
 }
