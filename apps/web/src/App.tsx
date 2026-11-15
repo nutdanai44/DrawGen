@@ -117,15 +117,20 @@ export default function App() {
     } else if(open) setNotice('Wait for editor to connect before saving.');
     else void persistFile(action);
   }
+  function openImportedDiagram(xml:string,name:string,handle:LocalFileHandle|null){
+    if(!isDrawioXml(xml)){setNotice('Invalid draw.io file');return;}
+    const count=countDiagramCells(xml);
+    const next={xml,revision:latest.current.revision+1,updatedAt:new Date().toISOString()};
+    latest.current=next;setDoc(next);setFileName(normalizeFileName(name));setFileHandle(handle);setSavedRevision(handle?next.revision:null);setProposal(null);
+    setReady(false);setEditorGeneration(v=>v+1);setOpen(true);
+    setNotice('Opening '+name+' ('+count+' shapes/connections) in draw.io…');
+  }
   async function importFile(file?:File){
     if(!file)return;
     if(open){setNotice('Close editor before opening another file.');return;}
     const xml=await file.text();
     if(!isDrawioXml(xml)){setNotice('Invalid draw.io file');return;}
-    save(xml);latest.current={...latest.current,xml,revision:latest.current.revision+1};
-    setFileName(normalizeFileName(file.name));
-    setFileHandle(null);setSavedRevision(null);setProposal(null);
-    setNotice('Opened '+file.name+'. Use Save As to choose a destination.');
+    openImportedDiagram(xml,file.name,null);
   }
   async function openFile(){
     if(open){setNotice('Close editor before opening another file.');return;}
@@ -136,9 +141,7 @@ export default function App() {
         const handle=handles[0];if(!handle)return;
         const file=await handle.getFile();const xml=await file.text();
         if(!isDrawioXml(xml)){setNotice('Invalid draw.io file');return;}
-        save(xml);latest.current={...latest.current,xml,revision:latest.current.revision+1};
-        setFileName(normalizeFileName(file.name));setFileHandle(handle);setSavedRevision(latest.current.revision);setProposal(null);
-        setNotice('Opened '+file.name);
+        openImportedDiagram(xml,file.name,handle);
       }catch(error){if((error as Error).name!=='AbortError')setNotice('Open failed: '+(error as Error).message);}
     } else document.getElementById('diagram-file-input')?.click();
   }
