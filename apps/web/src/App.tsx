@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { downloadDrawio, saveDrawioFile, normalizeFileName, type LocalFileHandle } from './fileStorage';
 import { DRAWIO_ORIGIN, DRAWIO_URL, EMPTY_XML, isDrawioXml, parseEditorMessage } from './editorBridge';
 type Doc = { xml: string; revision: number; updatedAt: string };
 type Mode = 'discuss' | 'auto' | 'review';
@@ -10,6 +11,9 @@ const initial: Doc = { xml: EMPTY_XML, revision: 0, updatedAt: new Date().toISOS
 function restore(): Doc { try { const value = JSON.parse(localStorage.getItem(KEY) || 'null') as Doc | null; if (value && isDrawioXml(value.xml) && Number.isInteger(value.revision)) return value; } catch {} return initial; }
 export default function App() {
   const [doc,setDoc] = useState<Doc>(restore);
+  const [fileName,setFileName] = useState('Untitled.drawio');
+  const [fileHandle,setFileHandle] = useState<LocalFileHandle|null>(null);
+  const [savedRevision,setSavedRevision] = useState<number|null>(null);
   const [open,setOpen] = useState(false);
   const [ready,setReady] = useState(false);
   const [editorGeneration,setEditorGeneration] = useState(0);
@@ -26,6 +30,7 @@ export default function App() {
   const latest = useRef(doc);
   const linesRef = useRef(lines);
   const pending = useRef(false);
+  const fileAction = useRef<'save'|'saveAs'|null>(null);
   useEffect(()=>{latest.current=doc;try{localStorage.setItem(KEY,JSON.stringify(doc));}catch{setNotice('Browser storage unavailable. Export your work.');}},[doc]);
   useEffect(()=>{linesRef.current=lines;},[lines]);
   const send = useCallback((value:object)=>{frame.current?.contentWindow?.postMessage(JSON.stringify(value),DRAWIO_ORIGIN);},[]);
@@ -40,6 +45,7 @@ export default function App() {
       const message=parseEditorMessage(event);if(!message)return;
       if(message.event==='init'){setReady(true);send({action:'load',xml:latest.current.xml,autosave:1});}
       if((message.event==='autosave'||message.event==='save')&&message.xml){if(!pending.current)save(message.xml);}
+      if(message.event==='export' && typeof message.xml==='string') { save(message.xml); const action=fileAction.current; fileAction.current=null; if(action) void persistFile(action,message.xml); }
       if(message.event==='exit'){setOpen(false);setReady(false);}
       if(message.event==='error')setNotice(message.message||'Editor error');
     };
@@ -73,11 +79,60 @@ export default function App() {
     }catch(error){const msg=error instanceof Error?error.message:'Unknown error';setLines(prev=>[...prev,{role:'assistant',content:'Error: '+msg}]);setNotice(msg);}
     finally{setBusy(false);}
   }
-  function exportFile(){const url=URL.createObjectURL(new Blob([doc.xml],{type:'application/xml'}));const a=document.createElement('a');a.href=url;a.download='flow-studio.drawio';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-  async function importFile(file?:File){if(!file)return;if(open){setNotice('Close editor before importing.');return;}const xml=await file.text();if(!isDrawioXml(xml)){setNotice('Invalid draw.io file');return;}save(xml);setProposal(null);setNotice('Imported '+file.name);}
-  function newFile(){if(open){setNotice('Close editor first.');return;}if(confirm('Replace current diagram? Export a backup if needed.')){save(EMPTY_XML);setProposal(null);setLines([]);}}
+  async function persistFile(action:'save'|'saveAs', xml:string=latest.current.xml) {
+    if(!isDrawioXml(xml)){setNotice('Cannot save invalid draw.io XML');return;}
+    try {
+      const result=await saveDrawioFile(xml,fileName,action==='save'?fileHandle:null);
+      if(result.handle)setFileHandle(result.handle);
+      setFileName(result.name);
+      setSavedRevision(latest.current.revision);
+      setNotice(result.downloaded?'Downloaded '+result.name+' (browser does not support direct file save).':'Saved '+result.name+' to your selected location.');
+    } catch(error) {
+      if((error as Error).name!=='AbortError')setNotice('Save failed: '+(error as Error).message);
+    }
+  }
+  function requestSave(action:'save'|'saveAs') {
+    if(open && ready) {
+      fileAction.current=action;
+      send({action:'export',format:'xml'});
+      setNotice('Syncing editor before saving…');
+    } else if(open) setNotice('Wait for editor to connect before saving.');
+    else void persistFile(action);
+  }
+  async function importFile(file?:File){
+    if(!file)return;
+    if(open){setNotice('Close editor before opening another file.');return;}
+    const xml=await file.text();
+    if(!isDrawioXml(xml)){setNotice('Invalid draw.io file');return;}
+    save(xml);latest.current={...latest.current,xml,revision:latest.current.revision+1};
+    setFileName(normalizeFileName(file.name));
+    setFileHandle(null);setSavedRevision(null);setProposal(null);
+    setNotice('Opened '+file.name+'. Use Save As to choose a destination.');
+  }
+  async function openFile(){
+    if(open){setNotice('Close editor before opening another file.');return;}
+    if('showOpenFilePicker' in window) {
+      try {
+        const picker=window as Window & {showOpenFilePicker:(options:object)=>Promise<LocalFileHandle[]>};
+        const handles=await picker.showOpenFilePicker({multiple:false,types:[{description:'draw.io diagrams',accept:{'application/xml':['.drawio','.xml']}}]});
+        const handle=handles[0];if(!handle)return;
+        const file=await handle.getFile();const xml=await file.text();
+        if(!isDrawioXml(xml)){setNotice('Invalid draw.io file');return;}
+        save(xml);latest.current={...latest.current,xml,revision:latest.current.revision+1};
+        setFileName(normalizeFileName(file.name));setFileHandle(handle);setSavedRevision(latest.current.revision);setProposal(null);
+        setNotice('Opened '+file.name);
+      }catch(error){if((error as Error).name!=='AbortError')setNotice('Open failed: '+(error as Error).message);}
+    } else document.getElementById('diagram-file-input')?.click();
+  }
+  function newFile(){
+    if(open){setNotice('Close editor first.');return;}
+    if(confirm('Replace current diagram? Save a backup if needed.')){
+      save(EMPTY_XML);latest.current={...latest.current,xml:EMPTY_XML,revision:latest.current.revision+1};
+      setFileName('Untitled.drawio');setFileHandle(null);setSavedRevision(null);setProposal(null);setLines([]);
+    }
+  }
   return <div className="shell">
-    <header className="topbar"><div className="brand">◇ AI Flow Studio <small>Phase 2</small></div><nav><button onClick={newFile}>New</button><label className="file-button">Import<input hidden type="file" accept=".drawio,.xml" onChange={e=>{void importFile(e.target.files?.[0]);e.target.value='';}}/></label><button onClick={exportFile}>Export .drawio</button><button className="primary" onClick={()=>setOpen(true)}>Open Editor</button></nav></header>
+    <header className="topbar"><div className="brand">◇ AI Flow Studio <small>Phase 2</small></div><nav><button onClick={newFile}>New</button><button onClick={()=>void openFile()}>Open File</button><input id="diagram-file-input" hidden type="file" accept=".drawio,.xml" onChange={e=>{void importFile(e.target.files?.[0]);e.target.value='';}}/><button onClick={()=>requestSave('save')}>Save</button><button onClick={()=>requestSave('saveAs')}>Save As</button><button onClick={()=>downloadDrawio(doc.xml,fileName)}>Download</button><button className="primary" onClick={()=>setOpen(true)}>Open Editor</button></nav></header>
     <main><aside className="chat"><h3>AI Assistant <small>OpenAI + Claude</small></h3>
       <label>AI Provider</label><select value={provider} onChange={e=>setProvider(e.target.value as Provider)}><option value="openai">OpenAI</option><option value="anthropic">Claude (Anthropic)</option></select>
       <label>{provider==='openai'?'OpenAI API Key':'Anthropic API Key'} (session only)</label>
@@ -87,7 +142,7 @@ export default function App() {
       <div className="chat-history">{lines.length===0?<div className="chat-placeholder"><h2>Design flows together</h2><p>Discuss first, then choose Auto or Review to create/edit the diagram.</p><p>Try “Create a login flow with OTP and token refresh”</p></div>:lines.map((m,i)=><div className={'bubble '+m.role} key={i}><strong>{m.role==='user'?'You':provider==='openai'?'AI':'AI'}</strong><p>{m.content}</p></div>)}</div>
       {proposal&&<div className="proposal"><strong>Proposed changes (revision {proposal.baseRevision})</strong>{proposal.changes.map((c,i)=><p key={i}>• {c}</p>)}<div className="proposal-buttons"><button className="primary" onClick={applyProposal}>Apply</button><button onClick={()=>{setProposal(null);setNotice('Proposal rejected.');}}>Reject</button></div></div>}
       <textarea value={prompt} onChange={e=>setPrompt(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();void submit();}}} placeholder="Describe a flow or request a change..."/><button className="primary" disabled={busy||!prompt.trim()} onClick={()=>void submit()}>{busy?'Generating…':mode==='discuss'?'Discuss':mode==='review'?'Propose Changes':'Generate / Apply'}</button>
-    </aside><section className="workspace"><div className="heading"><strong>Diagram Workspace</strong><span>Revision {doc.revision} · {new Date(doc.updatedAt).toLocaleString()}</span></div>
+    </aside><section className="workspace"><div className="heading"><strong><input aria-label="Diagram filename" className="filename-input" value={fileName} onChange={e=>setFileName(e.target.value)} onBlur={()=>setFileName(v=>normalizeFileName(v))}/>{savedRevision!==doc.revision?' • Unsaved to file':''}</strong><span>Revision {doc.revision} · {new Date(doc.updatedAt).toLocaleString()}</span></div>
       {open?<div className="editor"><div className="editor-bar"><span>{ready?'Editor connected':'Connecting…'}</span><button onClick={()=>send({action:'save'})}>Save</button><button onClick={()=>{if(confirm('Close editor? Unsaved edits may be lost.')){setOpen(false);setReady(false);}}}>Close</button></div><iframe key={editorGeneration} ref={frame} title="draw.io Editor" src={DRAWIO_URL} allow="clipboard-read; clipboard-write"/></div>
       :<div className="empty"><h2>Ready to draw</h2><p>Open draw.io to create or edit, or ask AI to generate a diagram.</p><button className="primary" onClick={()=>setOpen(true)}>Open draw.io Editor</button></div>}
       <footer>{notice}</footer></section></main>
