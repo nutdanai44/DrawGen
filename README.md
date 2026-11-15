@@ -1,5 +1,22 @@
-# AI Flow Studio
+# AI Flow Studio — Phase 1
 
-Local-first React + TypeScript + Fastify scaffold for an embedded draw.io editor, with future OpenAI/Claude Hybrid chat modes.
+Local React + TypeScript and Fastify workspace with embedded draw.io editor. OpenAI/Claude are planned Phase 2 adapters (no API calls yet).
 
-See the full project files and setup instructions in this repository.
+## Run
+
+```bash
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Open http://localhost:5173; Fastify health: http://127.0.0.1:3001/health.
+
+## Features
+
+- Embedded diagrams.net editor (requires internet to load)
+- Import/export `.drawio` XML
+- Local browser save and revision number
+- Chat panel and Discuss/Auto/Review mode placeholders
+
+Do not commit `.env` or API keys.
